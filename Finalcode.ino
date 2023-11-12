@@ -1,74 +1,147 @@
+#include "HX711.h"
+#include "DHT.h"
+#include <WiFiNINA.h>
 
 
-import RPi.GPIO as GPIO
-import tkinter as tk
-from tkinter import ttk
-import time
+char ssid[] = "Lavi";
+char password[] = "Laveshgarg";
+char server[] = "192.168.156.191";  
+int port = 8000;
 
-# Create a custom Morse code dictionary for letter and number mappings
-custom_code_dict = {
-    'A': '.-', 'B': '-...', 'C': '-.-.', 'D': '-..', 'E': '.',
-    'F': '..-.', 'G': '--.', 'H': '....', 'I': '..', 'J': '.---',
-    'K': '-.-', 'L': '.-..', 'M': '--', 'N': '-.', 'O': '---',
-    'P': '.--.', 'Q': '--.-', 'R': '.-.', 'S': '...', 'T': '-',
-    'U': '..-', 'V': '...-', 'W': '.--', 'X': '-..-', 'Y': '-.--',
-    'Z': '--..', '0': '-----', '1': '.----', '2': '..---', '3': '...--',
-    '4': '....-', '5': '.....', '6': '-....', '7': '--...', '8': '---..',
-    '9': '----.', ' ': '/'  # Representing space with '/'
+const int DT_PIN = 6;   
+const int SCK_PIN = 7;  
+const int ECG_LOP_PIN = 4; 
+const int ECG_LON_PIN = 11;
+const int MQ135_PIN = A1;   
+const int DHT_PIN = 2;      
+const float REQUIRED_HUMIDITY = 60.0;
+const float MIN_TEMPERATURE = 32.5;  
+const float MAX_TEMPERATURE = 37.5;  
+
+HX711 scale;
+DHT dht(DHT_PIN, DHT11);
+
+void setup() {
+   // Connect to Wi-Fi
+  while (WiFi.status() != WL_CONNECTED) {
+    Serial.print("Attempting to connect to SSID: ");
+    Serial.println(ssid);
+    WiFi.begin(ssid, password);
+    delay(10000); // Attempt to connect for 10 seconds
+  }
+  Serial.println("Connected to WiFi");
+  Serial.begin(9600);
+  scale.begin(DT_PIN, SCK_PIN);
+  dht.begin();
+  
+  Serial.println("Baby Incubator System Initialized.");
+  delay(2000);  // Give some time for initialization
 }
 
-# Set up GPIO: Configure the LED pin for output
-custom_LED_PIN = 7  # Adjust this to match the actual GPIO pin
-GPIO.setmode(GPIO.BOARD)
-GPIO.setup(custom_LED_PIN, GPIO.OUT)
+void loop() {
+  // Weight Measurement
+  if (scale.is_ready()) {
+    long weight = scale.get_units(10); // Average the reading over 10 samples for stability
+    Serial.print("Weight: ");
+    Serial.print(weight);
+    Serial.println(" grams");
+  } else {
+    Serial.println("Error reading from HX711. Check your connections.");
+  }
 
-# Function to transmit custom Morse code using LED blinking
-def custom_blink_morse_code(text):
-    for char in text.upper():
-        if char in custom_code_dict:
-            morse_code = custom_code_dict[char]
-            for symbol in morse_code:
-                if symbol == '.':
-                    GPIO.output(custom_LED_PIN, GPIO.HIGH)
-                    time.sleep(0.1)  # Duration of a dot
-                    GPIO.output(custom_LED_PIN, GPIO.LOW)
-                    time.sleep(0.1)  # Gap between dots and dashes
-                elif symbol == '-':
-                    GPIO.output(custom_LED_PIN, GPIO.HIGH)
-                    time.sleep(0.3)  # Duration of a dash
-                    GPIO.output(custom_LED_PIN, GPIO.LOW)
-                    time.sleep(0.1)  # Gap between dots and dashes
-            time.sleep(0.2)  # Gap between characters
-        else:
-            # Handle spaces and unknown characters with a longer gap
-            time.sleep(0.4)  # Gap between words
+  // ECG Measurement
+  int ecgValueLOP = analogRead(ECG_LOP_PIN);
+  int ecgValueLON = analogRead(ECG_LON_PIN);
+  Serial.print("ECG LO+ Value: ");
+  Serial.print(ecgValueLOP);
+  Serial.print("\tECG LO- Value: ");
+  Serial.println(ecgValueLON);
 
-root = tk.Tk()
-root.title("Custom Text to Morse Code LED Blinker")
+  // Gas Measurement
+  int mq135Value = analogRead(MQ135_PIN);
+  Serial.print("MQ135 Value: ");
+  Serial.println(mq135Value);
 
-# Function to start LED blinking when the button is clicked
-def start_custom_blinking():
-    text = custom_entry.get()
-    custom_blink_morse_code(text)
+  // Temperature and Humidity Measurement
+  float temperature = dht.readTemperature();
+  float humidity = dht.readHumidity();
+  Serial.print("Temperature: ");
+  Serial.print(temperature);
+  Serial.print(" °C\tHumidity: ");
+  Serial.print(humidity);
+  Serial.println(" %");
+ // Create the request string
+  String data = "temperature=" + String(temperature) +
+                "&humidity=" + String(humidity) +
+                "&weight=" + String(scale.get_units(10)) + // You may adjust the number of samples
+                "&ecg_lop=" + String(analogRead(ECG_LOP_PIN)) +
+                "&ecg_lon=" + String(analogRead(ECG_LON_PIN)) +
+                "&mq135=" + String(analogRead(MQ135_PIN));
 
-# Create a frame for the GUI with colorful background
-custom_frame = ttk.Frame(root, padding=(20, 20))
-custom_frame.grid(column=0, row=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-custom_frame.columnconfigure(0, weight=1)
-custom_frame.rowconfigure(0, weight=1)
+  // Send the data to the local server
+  if (sendDataToServer(data)) {
+    Serial.println("Data sent successfully.");
+  } else {
+    Serial.println("Failed to send data.");
+  }
 
-# Create a label with colorful font for instruction
-custom_label = ttk.Label(custom_frame, text="Insert a name", font=("Times New Roman", 20), foreground="blue")
-custom_label.grid(column=0, row=0, columnspan=2, pady=(0, 20))
+  delay(1000); // Delay for a second, adjust as needed
+}
 
-# Create an entry widget with colorful background for text input
-custom_entry = ttk.Entry(custom_frame, width=20, font=("Arial", 20), background="lightgreen")
-custom_entry.grid(column=0, row=1, columnspan=2, pady=(0, 10))
+bool sendDataToServer(String data) {
+  WiFiClient client;
+    if (sendDataToServer(data, temperature, humidity)) {
+    Serial.println("Data sent successfully.");
+  } else {
+    Serial.println("Failed to send data.");
+  }
 
-# Create a button with colorful background for starting LED blinking
-custom_button = ttk.Button(custom_frame, text="Blink", command=start_custom_blinking)
-custom_button.grid(column=0, row=2, columnspan=2, pady=(0, 20))
+  delay(1000); // Delay for a second, adjust as needed
+}
 
-root.mainloop()2
+bool sendDataToServer(String data, float temperature, float humidity) {
+  WiFiClient client;
+  
+  // Connect to the server
+  if (client.connect(server, port)) {
+    Serial.println("Connected to server.");
 
-GPIO.cleanup()
+    // Make an HTTP POST request
+    client.println("POST /your-endpoint HTTP/1.1");
+    client.println("Host: " + String(server));
+    client.println("Content-Type: application/x-www-form-urlencoded");
+    client.println("Content-Length: " + String(data.length()));
+    client.println();
+    client.println(data);
+
+    delay(1000); // Allow time for the server to process the request
+  // Read the server's response
+    while (client.available()) {
+      String line = client.readStringUntil('\r');
+      Serial.print(line);
+    }
+
+    // Disconnect from the server
+    client.stop();
+    Serial.println("\nDisconnected from server.");
+    return true;
+  } else {
+    Serial.println("Connection to server failed.");
+    return false;
+  }
+
+ if (humidity < REQUIRED_HUMIDITY) {
+    Serial.println("Humidity below required level. Activating Humidifier.");
+  } else {
+    Serial.println("Humidity at or above required level. Deactivating Humidifier.");
+  }
+// Temperature Control Logic
+  if (temperature < MIN_TEMPERATURE) {
+    Serial.println("Temperature below required level. Activating Heater.");
+  } else if (temperature > MAX_TEMPERATURE) {
+    Serial.println("Temperature above required level. Activating Cooler/Fan.");
+  } else {
+    Serial.println("Temperature within required range. Deactivating Heater and Cooler/Fan.");
+  }
+  delay(1000); // Delay for a second, adjust as needed
+}
